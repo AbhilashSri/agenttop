@@ -19,6 +19,33 @@ from agenttop.models import Event, Session, ToolName, ToolStats
 TOKENS_PER_CONVERSATION_ESTIMATE = 2000
 COST_PER_TOKEN = 0.000003  # Cursor uses mostly cheaper models
 
+# Directories that are containers, not project names
+_CONTAINER_DIRS = {"repo", "repos", "desktop", "projects", "dev", "src", "code", "work", "documents"}
+
+
+def _extract_project(filepath: str) -> str | None:
+    """Extract project name from an absolute file path.
+
+    Walks past the home directory and any container dirs (repo/, Desktop/, etc.)
+    to find the actual project directory name.
+    """
+    if not filepath or not filepath.startswith("/"):
+        return None
+    from pathlib import Path as _P
+
+    home = str(_P.home())
+    rel = filepath[len(home) + 1:] if filepath.startswith(home + "/") else filepath.lstrip("/")
+    parts = rel.split("/")
+
+    # Skip container directories to find the real project name
+    for i, part in enumerate(parts):
+        if part.lower() not in _CONTAINER_DIRS:
+            # Don't return if it looks like a file (has extension) with no subdirectory
+            if "." in part and i == len(parts) - 1:
+                return None
+            return part
+    return None
+
 
 class CursorCollector(BaseCollector):
     """Collects data from Cursor's local SQLite database."""
@@ -109,8 +136,14 @@ class CursorCollector(BaseCollector):
         return events
 
     def collect_sessions(self) -> list[Session]:
-        """Build sessions from conversation summaries."""
+        """Build sessions from conversation summaries and ai_code_hashes.
+
+        Uses conversation_summaries when available, otherwise groups
+        ai_code_hashes by conversationId and extracts project from file paths.
+        """
         sessions = []
+
+        # Try conversation summaries first
         for conv in self._get_conversations():
             updated_ms = conv.get("updatedAt", 0)
             if not updated_ms:
@@ -126,6 +159,49 @@ class CursorCollector(BaseCollector):
                     total_tokens=TOKENS_PER_CONVERSATION_ESTIMATE,
                     estimated_cost_usd=TOKENS_PER_CONVERSATION_ESTIMATE * COST_PER_TOKEN,
                     prompts=[conv.get("title", ""), conv.get("tldr", "")],
+                )
+            )
+
+        if sessions:
+            return sessions
+
+        # Fallback: build sessions from ai_code_hashes grouped by conversationId
+        return self._sessions_from_code_hashes()
+
+    def _sessions_from_code_hashes(self) -> list[Session]:
+        """Build sessions from ai_code_hashes, extracting project from file paths."""
+        groups: dict[str, list[dict]] = {}
+        for code in self._get_ai_code_hashes():
+            cid = code.get("conversationId") or "unknown"
+            groups.setdefault(cid, []).append(code)
+
+        sessions = []
+        for cid, entries in groups.items():
+            timestamps = []
+            project = None
+            for entry in entries:
+                ts_ms = entry.get("createdAt") or entry.get("timestamp") or 0
+                if ts_ms:
+                    timestamps.append(datetime.fromtimestamp(ts_ms / 1000))
+                if not project:
+                    project = _extract_project(entry.get("fileName", ""))
+
+            if not timestamps:
+                continue
+            start = min(timestamps)
+            end = max(timestamps)
+            msg_count = len(entries)
+            tokens = msg_count * TOKENS_PER_CONVERSATION_ESTIMATE
+            sessions.append(
+                Session(
+                    id=cid,
+                    tool=ToolName.CURSOR,
+                    project=project,
+                    start_time=start,
+                    end_time=end,
+                    message_count=msg_count,
+                    total_tokens=tokens,
+                    estimated_cost_usd=tokens * COST_PER_TOKEN,
                 )
             )
         return sessions

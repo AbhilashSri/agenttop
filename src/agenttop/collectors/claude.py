@@ -278,6 +278,10 @@ class ClaudeCodeCollector(BaseCollector):
     def get_stats(self, days: int = 0) -> ToolStats:
         """Aggregate stats from stats-cache.json for the dashboard.
 
+        Uses stats-cache.json for dates it covers, then supplements with
+        live data from history.jsonl for any dates beyond the cache
+        (the cache can become stale if Claude Code doesn't update it).
+
         Args:
             days: Number of days to aggregate. 0 = all available data.
         """
@@ -289,24 +293,38 @@ class ClaudeCodeCollector(BaseCollector):
         else:
             cutoff = ""  # no cutoff = all data
 
-        # Build hourly token estimates from history timestamps
+        # Dates covered by the stats cache
+        cache_dates: set[str] = set()
+
+        # Aggregate daily stats within the time range from cache
+        for day_data in daily:
+            date = day_data.get("date", "")
+            if date >= cutoff:
+                cache_dates.add(date)
+                stats.sessions_today += day_data.get("sessionCount", 0)
+                stats.messages_today += day_data.get("messageCount", 0)
+                stats.tool_calls_today += day_data.get("toolCallCount", 0)
+
+        # Supplement with history.jsonl for dates NOT in cache
+        # This handles the common case where stats-cache.json is stale
         hourly: list[int] = [0] * 24
+        history_sessions: set[str] = set()
         for rec in self._parse_history():
             ts_ms = rec.get("timestamp", 0)
             if not ts_ms:
                 continue
             ts = datetime.fromtimestamp(ts_ms / 1000)
-            if ts.strftime("%Y-%m-%d") >= cutoff:
-                hourly[ts.hour] += TOKENS_PER_MESSAGE_ESTIMATE
+            day_str = ts.strftime("%Y-%m-%d")
+            if day_str < cutoff:
+                continue
+            hourly[ts.hour] += TOKENS_PER_MESSAGE_ESTIMATE
+            if day_str not in cache_dates:
+                stats.messages_today += 1
+                sid = rec.get("sessionId", "")
+                if sid and sid not in history_sessions:
+                    history_sessions.add(sid)
+                    stats.sessions_today += 1
         stats.hourly_tokens = hourly
-
-        # Aggregate daily stats within the time range
-        for day_data in daily:
-            date = day_data.get("date", "")
-            if date >= cutoff:
-                stats.sessions_today += day_data.get("sessionCount", 0)
-                stats.messages_today += day_data.get("messageCount", 0)
-                stats.tool_calls_today += day_data.get("toolCallCount", 0)
 
         # Use real token counts from modelUsage when showing all-time stats,
         # otherwise fall back to message-based estimates for time-filtered views
