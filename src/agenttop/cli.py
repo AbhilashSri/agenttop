@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 
@@ -255,7 +256,8 @@ def _check_ollama(
         req = urllib.request.Request(base_url, method="GET")
         with urllib.request.urlopen(req, timeout=2):
             return True
-    except Exception:
+    except Exception as e:
+        logging.debug("Ollama check failed (%s): %s", base_url, e)
         return False
 
 
@@ -305,11 +307,23 @@ def _install_ollama() -> str | None:
     elif system == "Linux":
         click.echo("  Installing Ollama...")
         try:
+            import tempfile
+
+            with tempfile.NamedTemporaryFile(
+                suffix=".sh", prefix="ollama-install-", delete=False,
+            ) as tmp:
+                installer_path = tmp.name
             subprocess.run(
-                ["sh", "-c", "curl -fsSL https://ollama.com/install.sh | sh"],
+                ["curl", "-fsSL", "https://ollama.com/install.sh", "-o", installer_path],
+                check=True,
+                timeout=60,
+            )
+            subprocess.run(
+                ["sh", installer_path],
                 check=True,
                 timeout=120,
             )
+            os.unlink(installer_path)
             ollama_bin = shutil.which("ollama")
             if ollama_bin:
                 click.echo(click.style(
@@ -339,13 +353,14 @@ def _install_ollama() -> str | None:
 
 
 def _ensure_ollama(
-    model: str = "qwen3:1.7b",
+    model: str = "gemma3:4b",
     base_url: str = "http://localhost:11434",
 ) -> None:
     """Full Ollama setup: install, start server, pull model.
 
-    Handles the entire chain so `agenttop web` just works.
-    Falls back gracefully — dashboard still starts if any step fails.
+    Handles the entire chain so ``agenttop web`` just works.
+    Never raises — every step falls back gracefully with a warning,
+    and the dashboard still starts even if the LLM is unavailable.
     """
     import subprocess
     import time
@@ -362,11 +377,28 @@ def _ensure_ollama(
     # Step 2: Start ollama serve if not running
     if not _check_ollama(base_url):
         click.echo("  Starting Ollama...")
-        subprocess.Popen(
-            [ollama_bin, "serve"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        try:
+            proc = subprocess.Popen(
+                [ollama_bin, "serve"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            # Give it a moment and check it didn't crash immediately
+            time.sleep(0.3)
+            if proc.poll() is not None:
+                _, stderr = proc.communicate(timeout=2)
+                msg = stderr.decode("utf-8", errors="replace").strip()
+                logging.error("Ollama failed to start: %s", msg)
+                click.echo(click.style(
+                    f"  Ollama exited immediately: {msg[:120]}",
+                    fg="red",
+                ))
+        except (OSError, ValueError) as e:
+            logging.error("Failed to launch Ollama: %s", e)
+            click.echo(click.style(
+                f"  Failed to launch Ollama: {e}", fg="red",
+            ))
+
         for _ in range(15):
             time.sleep(0.5)
             if _check_ollama(base_url):
@@ -394,11 +426,11 @@ def _ensure_ollama(
                 f"  Ollama ready ({model})", fg="green",
             ))
             return
-    except Exception:
-        pass
+    except Exception as e:
+        logging.debug("Model %s not yet available: %s", model, e)
 
     # Step 4: Pull the model
-    click.echo(f"  Pulling {model} (one-time download, ~1GB)...")
+    click.echo(f"  Pulling {model} (one-time download, ~3GB)...")
     try:
         subprocess.run(
             [ollama_bin, "pull", model],

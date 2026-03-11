@@ -9,7 +9,7 @@
 
 set -e
 
-OLLAMA_MODEL="qwen3:1.7b"
+OLLAMA_MODEL="gemma3:4b"
 MIN_PYTHON_MAJOR=3
 MIN_PYTHON_MINOR=10
 SKIP_OLLAMA=false
@@ -108,9 +108,13 @@ if ! command -v ollama >/dev/null 2>&1; then
             ;;
         Linux)
             echo "  Installing Ollama..."
-            echo "  This will run: curl -fsSL https://ollama.com/install.sh | sh"
+            echo "  Downloading installer from https://ollama.com/install.sh"
             echo "  (may require sudo)"
-            curl -fsSL https://ollama.com/install.sh | sh
+            OLLAMA_INSTALLER=$(mktemp /tmp/ollama-install-XXXXXX.sh)
+            curl -fsSL https://ollama.com/install.sh -o "$OLLAMA_INSTALLER"
+            echo "  Installer saved to $OLLAMA_INSTALLER — review before continuing if needed."
+            sh "$OLLAMA_INSTALLER"
+            rm -f "$OLLAMA_INSTALLER"
             ;;
         *)
             echo "  [error] Unsupported OS for automatic Ollama install."
@@ -147,7 +151,7 @@ fi
 if ollama show "$OLLAMA_MODEL" >/dev/null 2>&1; then
     echo "  [ok] Model $OLLAMA_MODEL ready"
 else
-    echo "  Pulling $OLLAMA_MODEL (one-time download, ~1GB)..."
+    echo "  Pulling $OLLAMA_MODEL (one-time download, ~3GB)..."
     ollama pull "$OLLAMA_MODEL"
     echo "  [ok] Model $OLLAMA_MODEL ready"
 fi
